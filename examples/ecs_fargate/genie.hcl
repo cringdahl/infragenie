@@ -5,6 +5,8 @@ variables {
   environment = "dev"
   region = "us-east-1"
 }
+# unified locals for use in all pipelines
+locals {}
 
 # resource injections definition
 inject {

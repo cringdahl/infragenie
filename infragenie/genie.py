@@ -1,16 +1,21 @@
 import os, sys
 import json
 import glob
+import re
 import shutil
 from pathlib import Path
 import subprocess
 from rich import print
 import hcl2
 import click
+from git import Repo
 
 def construct_dag():
     pass
 
+def gitClone(repo, path):
+    shutil.rmtree(path,ignore_errors=True)
+    Repo.clone_from(repo,path)
 
 def parsetform(path):
     res = {}
@@ -20,7 +25,6 @@ def parsetform(path):
             res.update(d)
     return res
 
-
 def genVars(path, variables):
     with open(os.path.join(path, "genie_variables.tf"), "a") as f:
         for key, val in variables.items():
@@ -29,6 +33,19 @@ variable "{key}" {{
     default = "{val}"
 }}
 """)
+
+def genLocals(path, locals):
+    with open(os.path.join(path, "genie_locals.tf"), "w") as f:
+        f.write("locals ")
+        json.dump(locals, f, indent=2, separators=[",", " = "])
+
+    with open(os.path.join(path, "genie_locals.tf"), "r") as f:
+        fr = f.read()
+
+    with open(os.path.join(path, "genie_locals.tf"), "w") as f:
+        fr = re.sub(',\n','\n', fr)
+        fr = re.sub('\"(?P<all>.*)\" = ','\g<all> = ', fr)
+        f.write(fr)
 
 def genInputs(path, data, injects, resolved_outputs):
     with open(os.path.join(path, "genie_inputs.tf"), "a") as f:
@@ -98,13 +115,15 @@ def applyAndResolveOutputs(path, outputs, pipelineName):
     os.chdir(cdir)
     return resolved
 
-def destroyInfra(path, pipelineName):
+def destroyInfra(modulePath, pipelineName):
     cdir = os.getcwd()
-    os.chdir(path)
+    os.chdir(modulePath)
     subprocess.run(["terraform", "init"], check=True)
     subprocess.run(["terraform", "destroy", "-auto-approve", "-state", f"../../{pipelineName}.terraform.tfstate"], check=True)
     os.chdir(cdir)
-    shutil.rmtree(path)
+    shutil.rmtree(modulePath)
+    for file in glob.glob(os.path.join(cdir, f"{pipelineName}.terraform.tfstate*")):
+        os.remove(file)
 
 GENIESPLASH = """
 🧞 InfraGenie 😄
@@ -129,7 +148,7 @@ def apply():
         d = hcl2.load(f)
         print("found the following settings:",d)
         globalVars = d.get("variables", [{}])[0]
-
+        globalLocals = d.get("locals", [{}])[0]
     print("Rendering data outputs")
     injects = []
     for name, inject in d["inject"][0].items():
@@ -149,22 +168,30 @@ def apply():
     Path(".infragenie").mkdir(parents=True, exist_ok=True)
     resolved_outputs = []
     for pipeline in d["pipeline"][0]["steps"]:
-        if "source" in pipeline:
-            print("Creating pipeline step",pipeline["name"])
-            pipelinename, pipelinesource = pipeline["name"], pipeline.get("source")
+        print("Creating pipeline step",pipeline["name"])
+        pipelinename, pipelinesource = pipeline["name"], pipeline.get("source")
+        if "git" in pipeline.keys():
+            gitClone(pipeline["git"],pipelinesource)
+        modulePath = os.path.join(f".infragenie/{pipeline['name']}")
+        shutil.copytree(pipelinesource, modulePath)
 
-            modulePath = os.path.join(f".infragenie/{pipeline['name']}")
-            shutil.copytree(pipeline["source"], modulePath)
+        tformdata = parsetform(modulePath)
+        tformRequires = tformdata.get("data", [{}])
+        terraformResources = tformdata.get("resource", [{}])
 
-            tformdata = parsetform(modulePath)
-            tformRequires = tformdata.get("data", [{}])
-            terraformResources = tformdata.get("resource", [{}])
+        genVars(modulePath, globalVars)
+        if "variables" in pipeline.keys():
+            genVars(modulePath, pipeline["variables"])
+        if "locals" in pipeline.keys():
+            applyLocals = globalLocals | pipeline["locals"]
+        else:
+            applyLocals = globalLocals
 
-            genVars(modulePath, globalVars)
-            genInputs(modulePath, tformRequires, injects, resolved_outputs)
-            outputs = genoutputs(modulePath, terraformResources, injects)
-            tmpOutputs = applyAndResolveOutputs(modulePath, outputs, pipelinename)
-            resolved_outputs.extend(tmpOutputs)
+        genInputs(modulePath, tformRequires, injects, resolved_outputs)
+        genLocals(modulePath, applyLocals)
+        outputs = genoutputs(modulePath, terraformResources, injects)
+        tmpOutputs = applyAndResolveOutputs(modulePath, outputs, pipelinename)
+        resolved_outputs.extend(tmpOutputs)
 
 
 @click.command()

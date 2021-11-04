@@ -14,6 +14,7 @@ setup(
         "python-hcl2==3.0.1",
         "click==7.1.2",
         "rich==10.9.0",
+        "GitPython==3.1.24"
     ],
     version="0.1.5",
     url="https://github.com/diggerhq/infragenie",
